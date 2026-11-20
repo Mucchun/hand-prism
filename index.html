@@ -202,9 +202,12 @@ function frame(t) {
     ctx.drawImage(fx, 0, 0, w, h);
   } else if (smooth.length >= 2) {
     const [a, b] = smooth;
-    // Corners: index tip + thumb tip of each hand. Fixed order, so twisting
-    // the hands folds the sheet into a bow-tie like the original.
-    const quad = [a[8], b[8], b[4], a[4]];
+    // Corners: index tip + thumb tip of each hand. If turning a hand would make
+    // the top and bottom edges cross (a bow-tie), swap that hand's two corners so
+    // the sheet always stays one open, unfolded panel.
+    const side = (p, q, r) => (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+    const cross = (p, q, r, s) => side(p, q, r) * side(p, q, s) < 0 && side(r, s, p) * side(r, s, q) < 0;
+    const quad = cross(a[8], b[8], b[4], a[4]) ? [a[8], b[4], b[8], a[4]] : [a[8], b[8], b[4], a[4]];
     const xs = quad.map(p => p.x), ys = quad.map(p => p.y);
     renderEffect(t, Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys));
     ctx.save();
@@ -215,7 +218,7 @@ function frame(t) {
     ctx.drawImage(fx, 0, 0, w, h);
     ctx.restore();
     // Hairline so the sheet still reads as a rainbow thread when pinched flat.
-    const g = ctx.createLinearGradient(a[8].x, a[8].y, b[8].x, b[8].y);
+    const g = ctx.createLinearGradient(quad[0].x, quad[0].y, quad[1].x, quad[1].y);
     for (let i = 0; i <= 6; i++) g.addColorStop(i / 6, `hsl(${(i * 60 + t * 0.2) % 360} 100% 55%)`);
     ctx.strokeStyle = g;
     ctx.lineWidth = 2 * w / 1000;
