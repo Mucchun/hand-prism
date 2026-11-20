@@ -36,15 +36,22 @@ const mirror = !srcFile;                    // selfie view for the live camera
 // Low-res buffer the colour effect is computed in (upscaled into the quad).
 const fx = document.createElement("canvas");
 const fxCtx = fx.getContext("2d", { willReadFrequently: true });
-const FX_W = 480;
+const FX_W = 960;
 
-// Rainbow lookup table: luminance -> fully saturated hue.
+// Acid palette: luminance -> colour. Mixes neon hues with near-white and
+// near-black stops so bands read as distinct colours with crisp borders.
+const STOPS = ["#ff00c8","#ff5a00","#ffe600","#7dff00","#eaffd0","#00ffa2","#00e5ff","#0038ff",
+               "#12003a","#a200ff","#ff8cf0","#ff0030","#ffb300","#2bff00","#00ffe1","#f4f0ff",
+               "#5a00ff","#ff00c8"].map(h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16)));
 const LUT = new Uint8ClampedArray(256 * 3);
 for (let i = 0; i < 256; i++) {
-  const h = (i / 256) * 6, x = 1 - Math.abs((h % 2) - 1);
-  const [r, g, b] = [[1, x, 0], [x, 1, 0], [0, 1, x], [0, x, 1], [x, 0, 1], [1, 0, x]][Math.floor(h) % 6];
-  LUT.set([r * 255, g * 255, b * 255], i * 3);
+  const f = i / 256 * (STOPS.length - 1), k = Math.floor(f);
+  let u = f - k; u = u * u * (3 - 2 * u); u = u * u * (3 - 2 * u);   // steep blend = flat bands, sharp edges
+  for (let c = 0; c < 3; c++) LUT[i * 3 + c] = STOPS[k][c] + (STOPS[k + 1][c] - STOPS[k][c]) * u;
 }
+const NOISE = new Int8Array(65536);
+for (let i = 0; i < NOISE.length; i++) NOISE[i] = (Math.random() - 0.5) * 22;
+let lumBuf = new Float32Array(0), lo = 0, hi = 255;
 
 const BONES = [
   [0,1],[1,2],[2,3],[3,4], [0,5],[5,6],[6,7],[7,8], [5,9],[9,10],[10,11],[11,12],
@@ -101,17 +108,39 @@ function updateHands(raw) {
 }
 
 function renderEffect(t) {
-  const w = fx.width, h = fx.height;
+  const w = fx.width, h = fx.height, n = w * h;
   drawVideo(fxCtx, w, h);
   const img = fxCtx.getImageData(0, 0, w, h);
   const d = img.data;
-  const shift = t * 0.11;                       // slow drift through the spectrum
-  const pulse = Math.sin(t * 0.0021) * 40;      // faster wobble so colours flash
-  for (let i = 0; i < d.length; i += 4) {
-    const lum = (d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8;
-    const grain = (Math.random() - 0.5) * 34;
-    const idx = ((lum * 2.6 + shift + pulse + grain) & 255) * 3;
-    d[i] = LUT[idx]; d[i + 1] = LUT[idx + 1]; d[i + 2] = LUT[idx + 2];
+  if (lumBuf.length !== n) lumBuf = new Float32Array(n);
+
+  // Luminance + histogram, then auto-levels so even a dim room spans the whole palette.
+  const hist = new Uint32Array(256);
+  for (let i = 0, j = 0; j < n; i += 4, j++) {
+    const l = (d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8;
+    lumBuf[j] = l; hist[l]++;
+  }
+  let acc = 0, pLo = 0, pHi = 255;
+  for (let i = 0; i < 256; i++) { acc += hist[i]; if (acc > n * 0.02) { pLo = i; break; } }
+  acc = 0;
+  for (let i = 255; i >= 0; i--) { acc += hist[i]; if (acc > n * 0.02) { pHi = i; break; } }
+  lo += (pLo - lo) * 0.08; hi += (Math.max(pHi, pLo + 24) - hi) * 0.08;
+  const gain = 255 / (hi - lo);
+
+  const shift = t * 0.05 + Math.sin(t * 0.0013) * 45;   // palette drifts and surges
+  let seed = (Math.random() * 65536) | 0;
+  for (let y = 0, j = 0; y < h; y++) {
+    for (let x = 0; x < w; x++, j++) {
+      const l = (lumBuf[j] - lo) * gain;
+      // Edge strength (central differences) pushes contours into a different band -> outlines.
+      const gx = x > 0 && x < w - 1 ? lumBuf[j + 1] - lumBuf[j - 1] : 0;
+      const gy = y > 0 && y < h - 1 ? lumBuf[j + w] - lumBuf[j - w] : 0;
+      const edge = Math.min((Math.abs(gx) + Math.abs(gy)) * gain * 1.6, 70);
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      const idx = ((l * 1.8 + edge + shift + NOISE[(seed >> 8) & 65535]) & 255) * 3;
+      const o = j * 4;
+      d[o] = LUT[idx]; d[o + 1] = LUT[idx + 1]; d[o + 2] = LUT[idx + 2];
+    }
   }
   fxCtx.putImageData(img, 0, 0);
 }
@@ -144,7 +173,10 @@ function frame(t) {
   ctx.fillStyle = "rgba(20, 0, 8, 0.38)";
   ctx.fillRect(0, 0, w, h);
 
-  if (smooth.length >= 2) {
+  if (params.has("full")) {                     // debug: effect over the whole frame
+    renderEffect(t);
+    ctx.drawImage(fx, 0, 0, w, h);
+  } else if (smooth.length >= 2) {
     const [a, b] = smooth;
     // Corners: index tip + thumb tip of each hand. Fixed order, so twisting
     // the hands folds the sheet into a bow-tie like the original.
