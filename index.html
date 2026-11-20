@@ -135,7 +135,7 @@ function updateHands(raw) {
 // canvas pixels) is processed, which keeps full-resolution grain cheap.
 function renderEffect(t, x0, y0, x1, y1) {
   const w = fx.width, h = fx.height, k = w / canvas.width;
-  soft.width = 256; soft.height = Math.max(2, Math.round(256 * h / w));
+  soft.width = Math.min(w, 800); soft.height = Math.max(2, Math.round(soft.width * h / w));   // near camera resolution: keeps facial detail
   drawVideo(softCtx, soft.width, soft.height);
   buildLUT(t);
 
@@ -154,7 +154,7 @@ function renderEffect(t, x0, y0, x1, y1) {
   const bw = Math.min(w, Math.ceil(x1 * k) + 2) - bx, bh = Math.min(h, Math.ceil(y1 * k) + 2) - by;
   if (bw < 1 || bh < 1) return;
   fxCtx.imageSmoothingQuality = "high";
-  fxCtx.drawImage(soft, 0, 0, w, h);               // upscaled soft copy -> smooth, thermal-style contours
+  fxCtx.drawImage(soft, 0, 0, w, h);               // lightly smoothed copy -> clean contours without blockiness
   const img = fxCtx.getImageData(bx, by, bw, bh);
   const d = img.data;
   const shift = t * 0.035 + Math.sin(t * 0.0017) * 14;   // bands keep sliding through the image
