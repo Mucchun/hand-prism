@@ -38,14 +38,18 @@ const fx = document.createElement("canvas");
 const fxCtx = fx.getContext("2d", { willReadFrequently: true });
 const FX_W = 960;
 
-// Palette: a handful of flat colour bands along the luminance ramp. Every band's
-// hue, saturation and lightness drifts on its own clock, so the combination keeps
-// changing (mint + red + navy, then magenta + olive + blue, ...) and stays a little
-// dusty rather than neon. The two narrow bands act as contour outlines.
-const POS = [0, .15, .19, .36, .52, .56, .72, .87, 1];
+// Palette: colour bands along the luminance ramp. Every band's hue, saturation
+// and lightness runs on its own fast clock, so the whole sheet never stops
+// morphing — each region slides through colours independently of its neighbours.
+const NB = 14;
+const POS = Array.from({ length: NB + 1 }, (_, i) => i / NB);
+const rnd = (i, k) => { const x = Math.sin(i * 127.1 + k * 311.7) * 43758.5453; return x - Math.floor(x); };
 const BANDS = POS.map((_, i) => ({
-  h0: (i * 0.381966 + 0.07) % 1, hs: (i % 2 ? -1 : 1) * (0.000018 + 0.000011 * ((i * 7) % 5)),
-  sp: i * 1.7, lp: i * 2.3, ss: 0.00023 + 0.00007 * (i % 3), ls: 0.00031 + 0.00009 * ((i * 3) % 4),
+  h0: (i * 0.381966 + 0.07) % 1,
+  hs: (i % 2 ? -1 : 1) * (0.00012 + 0.00030 * rnd(i, 1)),      // full hue lap every ~2.5-8 s
+  ha: 0.0011 + 0.0016 * rnd(i, 2), hp: rnd(i, 3) * 6.28,       // plus a wobble so it isn't a plain rainbow roll
+  ss: 0.0017 + 0.0021 * rnd(i, 4), sp: rnd(i, 5) * 6.28,
+  ls: 0.0021 + 0.0027 * rnd(i, 6), lp: rnd(i, 7) * 6.28,
 }));
 const LUT = new Uint8ClampedArray(256 * 3);
 function hsl(h, s, l) {
@@ -54,22 +58,23 @@ function hsl(h, s, l) {
 }
 function buildLUT(t) {
   const cols = BANDS.map(b => hsl(
-    (((b.h0 + t * b.hs) % 1) + 1) % 1,
-    0.62 + 0.26 * Math.sin(t * b.ss + b.sp),
-    0.50 + 0.27 * Math.sin(t * b.ls + b.lp)));
-  cols[cols.length - 1] = cols[0];                 // wrap seamlessly
-  for (let i = 0, k = 0; i < 256; i++) {
-    const f = i / 256;
-    while (f >= POS[k + 1]) k++;
-    let u = (f - POS[k]) / (POS[k + 1] - POS[k]);
-    u = Math.min(1, u / 0.3); u = u * u * (3 - 2 * u);   // short blend, then a flat band
+    (((b.h0 + t * b.hs + 0.16 * Math.sin(t * b.ha + b.hp)) % 1) + 1) % 1,
+    0.74 + 0.24 * Math.sin(t * b.ss + b.sp),
+    0.52 + 0.24 * Math.sin(t * b.ls + b.lp)));
+  cols[NB] = cols[0];                              // wrap seamlessly
+  for (let i = 0; i < 256; i++) {
+    const f = i / 256 * NB, k = Math.floor(f);
+    let u = Math.min(1, (f - k) / 0.55); u = u * u * (3 - 2 * u);   // soft blend, then a flat band
     for (let c = 0; c < 3; c++) LUT[i * 3 + c] = cols[k][c] + (cols[k + 1][c] - cols[k][c]) * u;
   }
 }
+// Brightness curve: spreads the bright end (face, hands) over more bands than the dark end.
+const CURVE = new Float32Array(256);
+for (let i = 0; i < 256; i++) CURVE[i] = Math.pow(i / 255, 1.5) * 255 * 1.2;
 const soft = document.createElement("canvas");     // small copy -> smooth, thermal-style contours
 const softCtx = soft.getContext("2d");
 const NOISE = new Int8Array(65536);
-for (let i = 0; i < NOISE.length; i++) NOISE[i] = (Math.random() - 0.5) * (Math.random() < 0.25 ? 60 : 14);
+for (let i = 0; i < NOISE.length; i++) NOISE[i] = (Math.random() - 0.5) * (Math.random() < 0.2 ? 34 : 9);
 let lumBuf = new Float32Array(0), lo = 0, hi = 255;
 
 const BONES = [
@@ -150,11 +155,12 @@ function renderEffect(t) {
   lo += (pLo - lo) * 0.08; hi += (Math.max(pHi, pLo + 24) - hi) * 0.08;
   const gain = 255 / (hi - lo);
 
-  const shift = t * 0.012;                       // bands creep slowly across the image
+  const shift = t * 0.035 + Math.sin(t * 0.0017) * 14;   // bands keep sliding through the image
   let seed = (Math.random() * 65536) | 0;
   for (let j = 0, o = 0; j < n; j++, o += 4) {
     seed = (seed * 1103515245 + 12345) & 0x7fffffff;
-    const idx = (((lumBuf[j] - lo) * gain * 1.25 + shift + NOISE[(seed >> 8) & 65535]) & 255) * 3;
+    const l = Math.max(0, Math.min(255, (lumBuf[j] - lo) * gain)) | 0;
+    const idx = ((CURVE[l] + shift + NOISE[(seed >> 8) & 65535]) & 255) * 3;
     d[o] = LUT[idx]; d[o + 1] = LUT[idx + 1]; d[o + 2] = LUT[idx + 2];
   }
   fxCtx.putImageData(img, 0, 0);
