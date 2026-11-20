@@ -38,19 +38,38 @@ const fx = document.createElement("canvas");
 const fxCtx = fx.getContext("2d", { willReadFrequently: true });
 const FX_W = 960;
 
-// Acid palette: luminance -> colour. Mixes neon hues with near-white and
-// near-black stops so bands read as distinct colours with crisp borders.
-const STOPS = ["#ff00c8","#ff5a00","#ffe600","#7dff00","#eaffd0","#00ffa2","#00e5ff","#0038ff",
-               "#12003a","#a200ff","#ff8cf0","#ff0030","#ffb300","#2bff00","#00ffe1","#f4f0ff",
-               "#5a00ff","#ff00c8"].map(h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16)));
+// Palette: a handful of flat colour bands along the luminance ramp. Every band's
+// hue, saturation and lightness drifts on its own clock, so the combination keeps
+// changing (mint + red + navy, then magenta + olive + blue, ...) and stays a little
+// dusty rather than neon. The two narrow bands act as contour outlines.
+const POS = [0, .15, .19, .36, .52, .56, .72, .87, 1];
+const BANDS = POS.map((_, i) => ({
+  h0: (i * 0.381966 + 0.07) % 1, hs: (i % 2 ? -1 : 1) * (0.000018 + 0.000011 * ((i * 7) % 5)),
+  sp: i * 1.7, lp: i * 2.3, ss: 0.00023 + 0.00007 * (i % 3), ls: 0.00031 + 0.00009 * ((i * 3) % 4),
+}));
 const LUT = new Uint8ClampedArray(256 * 3);
-for (let i = 0; i < 256; i++) {
-  const f = i / 256 * (STOPS.length - 1), k = Math.floor(f);
-  let u = f - k; u = u * u * (3 - 2 * u); u = u * u * (3 - 2 * u);   // steep blend = flat bands, sharp edges
-  for (let c = 0; c < 3; c++) LUT[i * 3 + c] = STOPS[k][c] + (STOPS[k + 1][c] - STOPS[k][c]) * u;
+function hsl(h, s, l) {
+  const f = n => { const k = (n + h * 12) % 12; return 255 * (l - s * Math.min(l, 1 - l) * Math.max(-1, Math.min(k - 3, 9 - k, 1))); };
+  return [f(0), f(8), f(4)];
 }
+function buildLUT(t) {
+  const cols = BANDS.map(b => hsl(
+    (((b.h0 + t * b.hs) % 1) + 1) % 1,
+    0.62 + 0.26 * Math.sin(t * b.ss + b.sp),
+    0.50 + 0.27 * Math.sin(t * b.ls + b.lp)));
+  cols[cols.length - 1] = cols[0];                 // wrap seamlessly
+  for (let i = 0, k = 0; i < 256; i++) {
+    const f = i / 256;
+    while (f >= POS[k + 1]) k++;
+    let u = (f - POS[k]) / (POS[k + 1] - POS[k]);
+    u = Math.min(1, u / 0.3); u = u * u * (3 - 2 * u);   // short blend, then a flat band
+    for (let c = 0; c < 3; c++) LUT[i * 3 + c] = cols[k][c] + (cols[k + 1][c] - cols[k][c]) * u;
+  }
+}
+const soft = document.createElement("canvas");     // small copy -> smooth, thermal-style contours
+const softCtx = soft.getContext("2d");
 const NOISE = new Int8Array(65536);
-for (let i = 0; i < NOISE.length; i++) NOISE[i] = (Math.random() - 0.5) * 22;
+for (let i = 0; i < NOISE.length; i++) NOISE[i] = (Math.random() - 0.5) * (Math.random() < 0.25 ? 60 : 14);
 let lumBuf = new Float32Array(0), lo = 0, hi = 255;
 
 const BONES = [
@@ -109,9 +128,13 @@ function updateHands(raw) {
 
 function renderEffect(t) {
   const w = fx.width, h = fx.height, n = w * h;
-  drawVideo(fxCtx, w, h);
+  soft.width = w >> 2; soft.height = h >> 2;
+  drawVideo(softCtx, soft.width, soft.height);
+  fxCtx.imageSmoothingQuality = "high";
+  fxCtx.drawImage(soft, 0, 0, w, h);
   const img = fxCtx.getImageData(0, 0, w, h);
   const d = img.data;
+  buildLUT(t);
   if (lumBuf.length !== n) lumBuf = new Float32Array(n);
 
   // Luminance + histogram, then auto-levels so even a dim room spans the whole palette.
@@ -127,20 +150,12 @@ function renderEffect(t) {
   lo += (pLo - lo) * 0.08; hi += (Math.max(pHi, pLo + 24) - hi) * 0.08;
   const gain = 255 / (hi - lo);
 
-  const shift = t * 0.05 + Math.sin(t * 0.0013) * 45;   // palette drifts and surges
+  const shift = t * 0.012;                       // bands creep slowly across the image
   let seed = (Math.random() * 65536) | 0;
-  for (let y = 0, j = 0; y < h; y++) {
-    for (let x = 0; x < w; x++, j++) {
-      const l = (lumBuf[j] - lo) * gain;
-      // Edge strength (central differences) pushes contours into a different band -> outlines.
-      const gx = x > 0 && x < w - 1 ? lumBuf[j + 1] - lumBuf[j - 1] : 0;
-      const gy = y > 0 && y < h - 1 ? lumBuf[j + w] - lumBuf[j - w] : 0;
-      const edge = Math.min((Math.abs(gx) + Math.abs(gy)) * gain * 1.6, 70);
-      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
-      const idx = ((l * 1.8 + edge + shift + NOISE[(seed >> 8) & 65535]) & 255) * 3;
-      const o = j * 4;
-      d[o] = LUT[idx]; d[o + 1] = LUT[idx + 1]; d[o + 2] = LUT[idx + 2];
-    }
+  for (let j = 0, o = 0; j < n; j++, o += 4) {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    const idx = (((lumBuf[j] - lo) * gain * 1.25 + shift + NOISE[(seed >> 8) & 65535]) & 255) * 3;
+    d[o] = LUT[idx]; d[o + 1] = LUT[idx + 1]; d[o + 2] = LUT[idx + 2];
   }
   fxCtx.putImageData(img, 0, 0);
 }
